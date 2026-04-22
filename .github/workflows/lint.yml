@@ -1,0 +1,115 @@
+name: Lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: lint-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPORTS_DIR: .reports
+
+jobs:
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      security-events: write  # upload SARIF to code scanning
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v4.2.0
+        with:
+          enable-cache: true
+
+      - run: uv sync --frozen --dev
+
+      - name: Prepare reports directory
+        run: mkdir -p "${REPORTS_DIR}/lint"
+
+      - name: Ruff check (full suite, SARIF)
+        run: |
+          set +e
+          uv run ruff check --output-format=sarif \
+            --output-file="${REPORTS_DIR}/lint/ruff.sarif" src/ tests/
+          echo "ruff_exit=$?" >> "$GITHUB_ENV"
+          uv run ruff check --output-format=github src/ tests/ \
+            | tee "${REPORTS_DIR}/lint/ruff.log" || true
+        continue-on-error: true
+
+      - name: Ruff check (JSON report)
+        run: |
+          uv run ruff check --output-format=json \
+            --output-file="${REPORTS_DIR}/lint/ruff.json" src/ tests/ || true
+
+      - name: Ruff format check
+        run: |
+          set +e
+          uv run ruff format --check --diff src/ tests/ \
+            | tee "${REPORTS_DIR}/lint/ruff-format.log"
+          echo "format_exit=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+
+      - name: Write lint summary
+        if: always()
+        run: |
+          {
+            echo "## Lint report"
+            echo ""
+            if [ ! -f "${REPORTS_DIR}/lint/ruff.json" ]; then
+              echo "**ruff**: scanner did not produce output -- check logs"
+            elif [ -s "${REPORTS_DIR}/lint/ruff.json" ]; then
+              count=$(jq length "${REPORTS_DIR}/lint/ruff.json")
+              echo "**ruff** found **$count** issue(s)"
+            else
+              echo "**ruff**: clean"
+            fi
+            echo ""
+            echo "<details><summary>Ruff output</summary>"
+            echo ""
+            echo '```'
+            head -100 "${REPORTS_DIR}/lint/ruff.log" 2>/dev/null || echo "no output"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Ruff SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v3.27.5
+        with:
+          sarif_file: .reports/lint/ruff.sarif
+          category: ruff
+
+      - name: Upload lint logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lint-logs
+          path: .reports/lint/
+          retention-days: 14
+
+      - name: Fail if ruff found issues
+        run: |
+          if [ "${ruff_exit:-0}" != "0" ]; then
+            echo "Ruff check reported issues -- see logs above."
+            exit 1
+          fi
+          if [ "${format_exit:-0}" != "0" ]; then
+            echo "Ruff format check failed -- see diff above."
+            exit 1
+          fi

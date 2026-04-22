@@ -1,0 +1,62 @@
+name: OSV scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: osv-scan-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPORTS_DIR: .reports
+
+jobs:
+  osv-scan:
+    name: OSV scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Prepare reports directory
+        run: mkdir -p "${REPORTS_DIR}/osv"
+
+      - name: Run OSV-Scanner
+        uses: google/osv-scanner-action/osv-scanner-action@c51854704019a247608d928f370c98740469d4b5 # v2.3.5
+        with:
+          scan-args: |-
+            --output=.reports/osv/osv-results.sarif
+            --format=sarif
+            --recursive
+            ./
+        continue-on-error: true
+
+      - name: Upload OSV SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v3.27.5
+        with:
+          sarif_file: .reports/osv/osv-results.sarif
+          category: osv-scanner
+
+      - name: Upload OSV report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: osv-scan-report
+          path: .reports/osv/
+          retention-days: 30

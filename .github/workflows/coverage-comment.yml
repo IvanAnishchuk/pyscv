@@ -1,0 +1,71 @@
+name: Coverage comment
+
+on:
+  workflow_run:
+    workflows: ["Test"]
+    types: [completed]
+
+permissions: {}
+
+# Must match the primary Python version in test.yml matrix
+env:
+  PRIMARY_PYTHON: "3.13"
+
+concurrency:
+  group: coverage-comment-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Coverage comment + badge
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success'
+    timeout-minutes: 5
+    permissions:
+      contents: write       # push badge to data branch
+      pull-requests: write   # post PR comment
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      # No actions/checkout needed -- the coverage action uses
+      # GITHUB_TOKEN directly for all git operations. See:
+      # https://github.com/py-cov-action/python-coverage-comment-action#workflow_run
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: test-results-${{ env.PRIMARY_PYTHON }}
+          path: .reports/test/
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore .coverage to workspace root
+        run: cp .reports/test/.coverage .coverage 2>/dev/null || true
+
+      - name: Coverage comment + badge
+        uses: py-cov-action/python-coverage-comment-action@7188638f871f721a365d644f505d1ff3df20d683 # v3.40
+        with:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_PR_RUN_ID: ${{ github.event.workflow_run.id }}
+          COVERAGE_DATA_BRANCH: python-coverage-comment-action-data
+          MINIMUM_GREEN: 90
+          MINIMUM_ORANGE: 75
+          ANNOTATE_MISSING_LINES: true
+          ANNOTATION_TYPE: warning
+          COMMENT_TEMPLATE: |
+            {% extends "base" %}
+            {% block coverage_badges %}
+            {{ super() }}
+            {% if coverage.meta.branch_coverage and coverage.info.num_branches > 0 %}
+
+            | Metric | Covered | Total | Percentage |
+            |--------|---------|-------|------------|
+            | Statements | {{ coverage.info.covered_lines }} | {{ coverage.info.num_statements }} | {{ "%.1f" | format(coverage.info.covered_lines / coverage.info.num_statements * 100) }}% |
+            | Branches | {{ coverage.info.covered_branches }} | {{ coverage.info.num_branches }} | {{ "%.1f" | format(coverage.info.covered_branches / coverage.info.num_branches * 100) }}% |
+
+            <sub>{{ coverage.info.missing_lines }} statements missing, {{ coverage.info.missing_branches }} branches missing, {{ coverage.info.num_partial_branches }} partially covered</sub>
+            {% endif %}
+            {% endblock coverage_badges %}

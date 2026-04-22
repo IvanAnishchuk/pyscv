@@ -1,0 +1,102 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REPORTS_DIR: .reports
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.13", "3.14"]
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v4.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - run: uv sync --frozen --dev
+
+      - name: Run pytest with JUnit + coverage XML
+        id: pytest
+        run: |
+          mkdir -p "${REPORTS_DIR}/test"
+          set +e
+          uv run pytest tests/ -v 2>&1 | tee "${REPORTS_DIR}/test/pytest.log"
+          echo "exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      - name: Write test summary
+        if: always()
+        run: |
+          {
+            echo "## Test results (Python ${{ matrix.python-version }})"
+            echo ""
+            if [ -f "${REPORTS_DIR}/test/test-results.xml" ]; then
+              total=$(grep -oP 'tests="\K[0-9]+' "${REPORTS_DIR}/test/test-results.xml" | head -1)
+              failures=$(grep -oP 'failures="\K[0-9]+' "${REPORTS_DIR}/test/test-results.xml" | head -1)
+              errors=$(grep -oP 'errors="\K[0-9]+' "${REPORTS_DIR}/test/test-results.xml" | head -1)
+              skipped=$(grep -oP 'skipped="\K[0-9]+' "${REPORTS_DIR}/test/test-results.xml" | head -1)
+              total=${total:-0}; failures=${failures:-0}; errors=${errors:-0}; skipped=${skipped:-0}
+              passed=$((total - failures - errors - skipped))
+              echo "| Total | Passed | Failed | Errors | Skipped |"
+              echo "|---|---|---|---|---|"
+              echo "| $total | $passed | $failures | $errors | $skipped |"
+            fi
+            echo ""
+            if [ -f "${REPORTS_DIR}/test/coverage.xml" ]; then
+              line_rate=$(grep -oP 'line-rate="\K[0-9.]+' "${REPORTS_DIR}/test/coverage.xml" | head -1)
+              branch_rate=$(grep -oP 'branch-rate="\K[0-9.]+' "${REPORTS_DIR}/test/coverage.xml" | head -1)
+              line_rate=${line_rate:-0}; branch_rate=${branch_rate:-0}
+              line_pct=$(awk "BEGIN {printf \"%.2f\", $line_rate * 100}")
+              branch_pct=$(awk "BEGIN {printf \"%.2f\", $branch_rate * 100}")
+              echo "### Coverage"
+              echo ""
+              echo "- Lines: **${line_pct}%**"
+              echo "- Branches: **${branch_pct}%**"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Copy .coverage into reports dir
+        if: always()
+        run: cp .coverage "${REPORTS_DIR}/test/.coverage" 2>/dev/null || true
+
+      - name: Upload test + coverage artifacts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-results-${{ matrix.python-version }}
+          path: .reports/test/
+          retention-days: 14
+
+      - name: Fail if tests did not pass
+        if: steps.pytest.outputs.exit != '0' || steps.pytest.outcome == 'failure'
+        run: |
+          echo "pytest reported failures -- see test-results artifact and PR check."
+          exit 1

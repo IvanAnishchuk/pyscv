@@ -1,0 +1,285 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "Publish to TestPyPI instead of PyPI"
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  # -------------------------------------------------------------------
+  # Build wheel + sdist with reproducible settings, generate SBOM,
+  # attest provenance, and sign with sigstore.
+  # -------------------------------------------------------------------
+  build:
+    name: Build & attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    outputs:
+      hashes: ${{ steps.hash.outputs.hashes }}
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v4.2.0
+
+      - name: Compute SOURCE_DATE_EPOCH from tag commit
+        run: |
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct "${GITHUB_SHA}")" >> "$GITHUB_ENV"
+          echo "PYTHONHASHSEED=0" >> "$GITHUB_ENV"
+
+      - name: Build sdist and wheel
+        run: |
+          uv build
+          ls -la dist/
+
+      - name: Generate SBOM (CycloneDX)
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          uv export --format requirements-txt --no-emit-project > requirements-release.txt
+          uv tool run --from cyclonedx-bom cyclonedx-py requirements requirements-release.txt \
+            --output-format json \
+            --output-file "dist/${GITHUB_REPOSITORY##*/}-${VERSION}-sbom.cdx.json"
+          ls -la dist/
+
+      - name: Compute artifact hashes
+        id: hash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cd dist
+          HASHES=$(sha256sum *.whl *.tar.gz | base64 -w0)
+          echo "hashes=${HASHES}" >> "$GITHUB_OUTPUT"
+          sha256sum *.whl *.tar.gz > "${GITHUB_REPOSITORY##*/}-${VERSION}-SHA256SUMS.txt"
+
+      - name: Attest build provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: "dist/*.whl,dist/*.tar.gz"
+
+      - name: Attest SBOM
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          echo "sbom_path=dist/${GITHUB_REPOSITORY##*/}-${VERSION}-sbom.cdx.json" >> "$GITHUB_ENV"
+
+      - name: Attest SBOM (upload)
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: "dist/*.whl"
+          sbom-path: "${{ env.sbom_path }}"
+
+      - name: Sign artifacts with sigstore
+        uses: sigstore/gh-action-sigstore-python@04cffa1d795717b140764e8b640de88853c92acc # v3.3.0
+        with:
+          inputs: ./dist/*.whl ./dist/*.tar.gz
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-dist
+          path: |
+            dist/
+            requirements-release.txt
+          retention-days: 7
+
+  # -------------------------------------------------------------------
+  # SLSA Level 3 provenance generator (reusable workflow).
+  # Pinned by tag, NOT SHA. The generator's generate-builder.sh
+  # requires refs/tags/vX.Y.Z to fetch its pre-built binary -- commit
+  # SHAs cause "Invalid ref" (exit 2). This is an accepted exception
+  # to the SHA-pinning policy: tags can be retargeted upstream, but
+  # the reusable workflow runs in an isolated environment the caller
+  # cannot tamper with, and SLSA provenance is independently verifiable.
+  # Requires contents: write even with upload-assets: false due to
+  # static permission validation (slsa-github-generator#2044).
+  # -------------------------------------------------------------------
+  provenance:
+    name: SLSA L3 provenance
+    needs: build
+    permissions:
+      contents: write    # upload-assets job inside reusable workflow requires write
+      id-token: write
+      actions: read
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.build.outputs.hashes }}
+      upload-assets: false
+      provenance-name: ${{ github.event.repository.name }}-${{ github.ref_name }}-provenance.intoto.jsonl
+
+  # -------------------------------------------------------------------
+  # Publish to PyPI via trusted publishing (OIDC, no password).
+  # Only stable releases (no dev/a/b/c pre-release segments).
+  # Protected by the `pypi` environment which requires manual approval.
+  # -------------------------------------------------------------------
+  publish-pypi:
+    name: Publish to PyPI
+    needs: build
+    if: >-
+      github.event_name == 'push'
+      && startsWith(github.ref, 'refs/tags/v')
+      && !contains(github.ref_name, 'dev')
+      && !contains(github.ref_name, 'a')
+      && !contains(github.ref_name, 'b')
+      && !contains(github.ref_name, 'c')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/${{ github.event.repository.name }}/
+    permissions:
+      id-token: write      # OIDC for trusted publishing
+      attestations: write  # PEP 740 publish attestations
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: release-dist/
+
+      - name: Prepare dist/
+        run: |
+          mkdir -p dist
+          cp release-dist/dist/*.whl release-dist/dist/*.tar.gz dist/
+          ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          print-hash: true
+          verbose: true
+
+  # -------------------------------------------------------------------
+  # Publish to TestPyPI for pre-releases or manual dispatch.
+  # -------------------------------------------------------------------
+  publish-testpypi:
+    name: Publish to TestPyPI
+    needs: build
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.testpypi)
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+          && (contains(github.ref_name, 'dev') || contains(github.ref_name, 'a')
+              || contains(github.ref_name, 'b') || contains(github.ref_name, 'c')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/${{ github.event.repository.name }}/
+    permissions:
+      id-token: write      # OIDC for trusted publishing
+      attestations: write  # PEP 740 publish attestations
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: release-dist/
+
+      - name: Prepare dist/
+        run: |
+          mkdir -p dist
+          cp release-dist/dist/*.whl release-dist/dist/*.tar.gz dist/
+
+      - name: Publish to TestPyPI
+        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        with:
+          repository-url: https://test.pypi.org/legacy/
+          print-hash: true
+          verbose: true
+
+  # -------------------------------------------------------------------
+  # Create GitHub Release with all artifacts (wheel, sdist, SBOM,
+  # sigstore bundles, SLSA provenance).
+  # -------------------------------------------------------------------
+  github-release:
+    name: Create GitHub Release
+    needs: [build, provenance, publish-pypi, publish-testpypi]
+    if: >-
+      always()
+      && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+      && needs.build.result == 'success'
+      && needs.provenance.result == 'success'
+      && (needs.publish-pypi.result == 'success' || needs.publish-pypi.result == 'skipped')
+      && (needs.publish-testpypi.result == 'success' || needs.publish-testpypi.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Harden runner
+        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-dist
+          path: release-dist/
+
+      - name: Download SLSA provenance
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ github.event.repository.name }}-${{ github.ref_name }}-provenance.intoto.jsonl
+          path: release-dist/
+
+      - name: Extract release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          awk -v ver="$VERSION" '
+            /^## \[/ { if (p) exit; if ($0 ~ "\\[" ver "\\]") p=1; next }
+            p { print }
+          ' CHANGELOG.md > release-notes.md
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release with assets
+        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        with:
+          name: "${{ github.event.repository.name }} ${{ steps.notes.outputs.version }}"
+          body_path: release-notes.md
+          draft: true
+          prerelease: ${{ contains(github.ref_name, 'dev') || contains(github.ref_name, 'a') || contains(github.ref_name, 'b') || contains(github.ref_name, 'c') }}
+          generate_release_notes: true
+          files: |
+            release-dist/dist/*.whl
+            release-dist/dist/*.tar.gz
+            release-dist/dist/*-sbom.cdx.json
+            release-dist/dist/*-SHA256SUMS.txt
+            release-dist/dist/*.sigstore.json
+            release-dist/*-provenance.intoto.jsonl
+
+      - name: Publish release
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
+        env:
+          GH_TOKEN: ${{ github.token }}
