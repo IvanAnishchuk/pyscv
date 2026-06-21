@@ -54,7 +54,7 @@ jobs:
       - name: Generate SBOM (CycloneDX)
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          uv export --format requirements-txt --no-emit-project > requirements-release.txt
+          uv run python scripts/regen_requirements.py --stdout > requirements-release.txt
           uv tool run --from cyclonedx-bom cyclonedx-py requirements requirements-release.txt \
             --output-format json \
             --output-file "dist/${GITHUB_REPOSITORY##*/}-${VERSION}-sbom.cdx.json"

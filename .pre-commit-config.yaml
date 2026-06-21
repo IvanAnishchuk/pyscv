@@ -59,16 +59,6 @@ repos:
     hooks:
       - id: uv-lock
 
-  - repo: local
-    hooks:
-      - id: regen-requirements
-        name: regenerate requirements.txt and requirements-dev.txt
-        entry: uv run python scripts/regen_requirements.py
-        language: system
-        files: ^(pyproject\.toml|uv\.lock)$
-        pass_filenames: false
-        require_serial: true
-
   # ── Ruff + ty via uv ─────────────────────────────────────────
   - repo: local
     hooks:
