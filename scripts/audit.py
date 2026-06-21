@@ -8,10 +8,11 @@ Usage:
 
 from __future__ import annotations
 
-import hashlib
+import importlib.util
 import json
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from rich.console import Console
@@ -20,10 +21,16 @@ console = Console()
 REPO_ROOT = Path(__file__).resolve().parent.parent
 REPORTS_DIR = REPO_ROOT / ".reports" / "audit"
 
-PROD_REQ = REPO_ROOT / "requirements.txt"
-DEV_REQ = REPO_ROOT / "requirements-dev.txt"
+TOTAL_STEPS = 4
 
-TOTAL_STEPS = 6
+# Load the sibling export helper in-process (scripts/ is not a package).
+_regen_spec = importlib.util.spec_from_file_location(
+    "regen_requirements", REPO_ROOT / "scripts" / "regen_requirements.py"
+)
+if _regen_spec is None or _regen_spec.loader is None:
+    raise ImportError(name="regen_requirements")
+regen = importlib.util.module_from_spec(_regen_spec)
+_regen_spec.loader.exec_module(regen)
 
 
 def step(n: int, msg: str) -> None:
@@ -35,19 +42,9 @@ def ok(msg: str) -> None:
     console.print(f"   [bold green]ok[/] {msg}")
 
 
-def warn(msg: str) -> None:
-    console.print(f"   [bold yellow]!![/] {msg}")
-
-
 def fail(msg: str) -> None:
     console.print(f"   [bold red]FAIL[/] {msg}")
     sys.exit(1)
-
-
-def file_sha256(path: Path) -> str:
-    if not path.exists():
-        return ""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def run_capture(cmd: list[str]) -> tuple[int, str]:
@@ -66,63 +63,41 @@ def load_sbom_components(path: Path) -> int:
     return len(data.get("components", []))
 
 
-def main() -> int:
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+def export_requirements(tmpdir: Path, *, include_dev: bool) -> Path:
+    """Export one requirements set from uv.lock into tmpdir, return its path."""
+    name = "requirements-dev.txt" if include_dev else "requirements.txt"
+    dest = tmpdir / name
+    dest.write_text(regen.export(include_dev=include_dev), encoding="utf-8")
+    return dest
 
+
+def check_lock_in_sync() -> None:
     step(1, "uv.lock in sync with pyproject.toml")
     code, out = run_capture(["uv", "lock", "--check"])
     if code == 0:
         ok("uv.lock is up to date")
     else:
         console.print(out)
-        fail("uv.lock is out of date -- run: uv run python scripts/regen_requirements.py")
+        fail("uv.lock is out of date -- run: uv lock")
 
-    step(2, "requirements*.txt in sync with uv.lock")
-    prod_before = file_sha256(PROD_REQ)
-    dev_before = file_sha256(DEV_REQ)
-    code, out = run_capture([sys.executable, str(REPO_ROOT / "scripts" / "regen_requirements.py")])
-    if code != 0:
-        console.print(out)
-        fail("Failed to regenerate requirements files")
-    prod_after = file_sha256(PROD_REQ)
-    dev_after = file_sha256(DEV_REQ)
-    stale = False
-    if prod_before != prod_after:
-        warn(f"requirements.txt was stale ({prod_before[:12]} -> {prod_after[:12]})")
-        stale = True
-    if dev_before != dev_after:
-        warn(f"requirements-dev.txt was stale ({dev_before[:12]} -> {dev_after[:12]})")
-        stale = True
-    if stale:
-        fail("Files were regenerated. Review and commit them.")
-    ok("requirements.txt and requirements-dev.txt are current")
 
-    step(3, "pip-audit on requirements.txt (prod)")
-    log = REPORTS_DIR / "pip-audit.log"
+def pip_audit(step_n: int, req: Path, scope: str, logname: str) -> None:
+    step(step_n, f"pip-audit on {req.name} ({scope})")
+    log = REPORTS_DIR / logname
     code, out = run_capture(
-        ["uv", "run", "pip-audit", "--strict", "--desc", "--requirement", str(PROD_REQ)]
+        ["uv", "run", "pip-audit", "--strict", "--desc", "--requirement", str(req)]
     )
     log.write_text(out, encoding="utf-8")
     if code == 0:
-        ok("No known vulnerabilities in prod dependencies")
+        ok(f"No known vulnerabilities in {scope} dependencies")
     else:
         console.print(out)
-        fail(f"pip-audit found vulnerabilities in prod -- see {log.relative_to(REPO_ROOT)}")
+        fail(f"pip-audit found vulnerabilities in {scope} -- see {log.relative_to(REPO_ROOT)}")
 
-    step(4, "pip-audit on requirements-dev.txt (prod + dev)")
-    log_dev = REPORTS_DIR / "pip-audit-dev.log"
-    code, out = run_capture(
-        ["uv", "run", "pip-audit", "--strict", "--desc", "--requirement", str(DEV_REQ)]
-    )
-    log_dev.write_text(out, encoding="utf-8")
-    if code == 0:
-        ok("No known vulnerabilities in dev dependencies")
-    else:
-        console.print(out)
-        fail(f"pip-audit found vulnerabilities in dev -- see {log_dev.relative_to(REPO_ROOT)}")
 
-    step(5, "CycloneDX SBOM (prod)")
-    sbom = REPORTS_DIR / "sbom.cdx.json"
+def generate_sbom(step_n: int, req: Path, scope: str, outname: str) -> None:
+    step(step_n, f"CycloneDX SBOM ({scope})")
+    sbom = REPORTS_DIR / outname
     code, out = run_capture(
         [
             "uv",
@@ -132,7 +107,7 @@ def main() -> int:
             "cyclonedx-bom",
             "cyclonedx-py",
             "requirements",
-            str(PROD_REQ),
+            str(req),
             "--output-format",
             "json",
             "--output-file",
@@ -141,34 +116,21 @@ def main() -> int:
     )
     if code != 0:
         console.print(out)
-        fail("cyclonedx-py failed for prod")
+        fail(f"cyclonedx-py failed for {scope}")
     components = load_sbom_components(sbom)
-    ok(f"SBOM (prod) with {components} components -> {sbom.relative_to(REPO_ROOT)}")
+    ok(f"SBOM ({scope}) with {components} components -> {sbom.relative_to(REPO_ROOT)}")
 
-    step(6, "CycloneDX SBOM (prod + dev)")
-    sbom_dev = REPORTS_DIR / "sbom-dev.cdx.json"
-    code, out = run_capture(
-        [
-            "uv",
-            "tool",
-            "run",
-            "--from",
-            "cyclonedx-bom",
-            "cyclonedx-py",
-            "requirements",
-            str(DEV_REQ),
-            "--output-format",
-            "json",
-            "--output-file",
-            str(sbom_dev),
-        ]
-    )
-    if code != 0:
-        console.print(out)
-        fail("cyclonedx-py failed for dev")
-    components = load_sbom_components(sbom_dev)
-    ok(f"SBOM (dev) with {components} components -> {sbom_dev.relative_to(REPO_ROOT)}")
 
+def main() -> int:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    check_lock_in_sync()
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        prod_req = export_requirements(tmp, include_dev=False)
+        dev_req = export_requirements(tmp, include_dev=True)
+        pip_audit(2, prod_req, "prod", "pip-audit.log")
+        pip_audit(3, dev_req, "prod + dev", "pip-audit-dev.log")
+        generate_sbom(4, prod_req, "prod", "sbom.cdx.json")
     console.print()
     console.print("[bold green]All audits passed.[/]")
     console.print(f"Reports written to {REPORTS_DIR.relative_to(REPO_ROOT)}/")
