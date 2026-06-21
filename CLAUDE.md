@@ -1,3 +1,5 @@
+<!-- cadence: remember, handoff-guard, solo-pm -->
+
 # CLAUDE.md
 
 ## Project Overview
@@ -39,4 +41,4 @@ uv run python scripts/audit.py
 - ty for type checking
 - pytest with coverage (threshold in pyproject.toml)
 - Conventional commits enforced by pre-commit hook
-- All CI checks must pass before merge (see .github/workflows/ci.yml)
+- All CI checks must pass before merge (see .github/workflows/)

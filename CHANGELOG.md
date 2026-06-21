@@ -10,3 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Added
 
 - Initial project scaffold.
+
+### Changed
+
+- Opted the repo into the cadence handoff convention and refreshed a stale
+  CLAUDE.md workflow reference.
