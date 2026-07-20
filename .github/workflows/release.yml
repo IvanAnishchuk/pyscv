@@ -30,16 +30,16 @@ jobs:
       hashes: ${{ steps.hash.outputs.hashes }}
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: astral-sh/setup-uv@cec208311dfd045dd5311c1add060b2062131d57 # v4.2.0
+      - uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v4.2.0
 
       - name: Compute SOURCE_DATE_EPOCH from tag commit
         run: |
@@ -70,7 +70,7 @@ jobs:
           sha256sum *.whl *.tar.gz > "${GITHUB_REPOSITORY##*/}-${VERSION}-SHA256SUMS.txt"
 
       - name: Attest build provenance
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: "dist/*.whl,dist/*.tar.gz"
 
@@ -80,13 +80,13 @@ jobs:
           echo "sbom_path=dist/${GITHUB_REPOSITORY##*/}-${VERSION}-sbom.cdx.json" >> "$GITHUB_ENV"
 
       - name: Attest SBOM (upload)
-        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: "dist/*.whl"
           sbom-path: "${{ env.sbom_path }}"
 
       - name: Sign artifacts with sigstore
-        uses: sigstore/gh-action-sigstore-python@04cffa1d795717b140764e8b640de88853c92acc # v3.3.0
+        uses: sigstore/gh-action-sigstore-python@5b79a39c381910c090341a2c9b0bf022c8b387e1 # v3.4.0
         with:
           inputs: ./dist/*.whl ./dist/*.tar.gz
 
@@ -148,7 +148,7 @@ jobs:
       attestations: write  # PEP 740 publish attestations
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
@@ -165,7 +165,7 @@ jobs:
           ls -la dist/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
           print-hash: true
           verbose: true
@@ -191,7 +191,7 @@ jobs:
       attestations: write  # PEP 740 publish attestations
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
@@ -207,7 +207,7 @@ jobs:
           cp release-dist/dist/*.whl release-dist/dist/*.tar.gz dist/
 
       - name: Publish to TestPyPI
-        uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # v1.14.0
+        uses: pypa/gh-action-pypi-publish@ba38be9e461d3875417946c167d0b5f3d385a247 # v1.14.1
         with:
           repository-url: https://test.pypi.org/legacy/
           print-hash: true
@@ -233,11 +233,11 @@ jobs:
       contents: write
     steps:
       - name: Harden runner
-        uses: step-security/harden-runner@6c3c2f2c1c457b00c10c4848d6f5491db3b629df # v2.18.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: audit
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
 
@@ -264,7 +264,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Create draft release with assets
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           name: "${{ github.event.repository.name }} ${{ steps.notes.outputs.version }}"
           body_path: release-notes.md
